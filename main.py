@@ -1,30 +1,20 @@
 import asyncio
-import csv
 import json
 import logging
-import re
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 from bs4 import BeautifulSoup
 from crawl4ai import (
-    AsyncWebCrawler,
-    BrowserConfig,
     CrawlerRunConfig,
 )
 from sentence_transformers import SentenceTransformer
 import numpy as np
+from playwright.async_api import Page
 
 
 logging.basicConfig(level=logging.INFO)
 
-embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
-
-browser_config = BrowserConfig(
-    headless=False,
-    use_managed_browser=True,
-    user_data_dir="/Users/ryan/my_chrome_profile",
-    browser_type="chromium",
-)
+embedding_model = SentenceTransformer("Qwen/Qwen3-Embedding-0.6B")
 
 
 def calculate_similarity(query: str, product_title: str) -> float:
@@ -32,11 +22,10 @@ def calculate_similarity(query: str, product_title: str) -> float:
     Calculate cosine similarity between query and product title.
     Returns a score between 0 and 1 (higher = more similar).
     """
-    # encode both texts
-    query_embedding = embedding_model.encode(query, convert_to_tensor=False)
-    title_embedding = embedding_model.encode(product_title, convert_to_tensor=False)
 
-    # calculate cosine similarity
+    query_embedding = embedding_model.encode(query, show_progress_bar=False)
+    title_embedding = embedding_model.encode(product_title, show_progress_bar=False)
+
     similarity = np.dot(query_embedding, title_embedding) / (
         np.linalg.norm(query_embedding) * np.linalg.norm(title_embedding)
     )
@@ -61,11 +50,18 @@ def filter_products_by_similarity(
     filtered_products = []
 
     for product in products:
-        title = product.get("title", "")
-        if not title or title == "N/A":
+        title: str = product.get("title", "")
+        if not title:
             continue
 
-        similarity_score = calculate_similarity(query, title)
+        similarity_score = calculate_similarity(
+            query.lower(), title.replace("(", "").replace(")", "").lower()
+        )
+
+        if similarity_score > 0.85:
+            print(f"title: {title}")
+            print(f"query: {query}")
+            print(f"similarity_score: {similarity_score}")
 
         if similarity_score >= threshold:
             product["similarity_score"] = round(similarity_score, 3)
@@ -81,39 +77,38 @@ def extract_amazon_data(html):
     soup = BeautifulSoup(html, "html.parser")
     products = []
 
+    _item = {}
     for item in soup.find_all("div", {"data-component-type": "s-search-result"}):
         is_sponsor = item.find(string="Sponsorowane")
         if is_sponsor:
             continue
         try:
+            _item = item
+
             title_div = item.find("div", {"data-cy": "title-recipe"})
             title_span = title_div.find("span") if title_div else None
-            title = title_span.get_text(strip=True) if title_span else ""
+            title = title_span.get_text() if title_span else ""
 
             price_whole = item.find("span", {"class": "a-price-whole"})
             price_fraction = item.find("span", {"class": "a-price-fraction"})
             price = (
-                f"{price_whole.get_text(strip=True)}{price_fraction.get_text(strip=True)}"
+                f"{price_whole.get_text()}{price_fraction.get_text()}"
                 if price_whole and price_fraction
-                else "N/A"
+                else "0.0"
             )
 
             link_elem = item.find("a", {"class": "a-link-normal"})
-            link = (
-                f"https://www.amazon.pl{link_elem['href']}"
-                if link_elem and "href" in link_elem.attrs
-                else "N/A"
-            )
+            link = f"https://www.amazon.pl{link_elem['href']}"
 
             products.append(
                 {
                     "title": title,
-                    "price": price,
+                    "price": parse_price(price),
                     "link": link,
                 }
             )
         except Exception as e:
-            print(f"Error parsing product: {e}")
+            print(f"Error parsing product({_item}): {e}")
             continue
 
     return products
@@ -136,7 +131,9 @@ def extract_allegro_data(html):
                     title = el.get("alt")
                     price = el.get("price", {}).get("mainPrice", {}).get("amount")
                     link = el.get("url")
-                    products.append({"title": title, "price": price, "link": link})
+                    products.append(
+                        {"title": title, "price": parse_price(price), "link": link}
+                    )
 
             except json.JSONDecodeError as e:
                 print(f"JSON decode error: {e}")
@@ -162,7 +159,9 @@ def extract_pepper_data(html):
             price = thread.get("price")
 
             if title and link and price:
-                products.append({"title": title, "link": link, "price": price})
+                products.append(
+                    {"title": title, "link": link, "price": parse_price(price)}
+                )
 
         except Exception as e:
             print(f"Error parsing product: {e}")
@@ -183,7 +182,7 @@ def extract_pepper_data(html):
 
                 if not name_elem:
                     continue
-                title = name_elem.get_text(strip=True)
+                title = name_elem.get_text()
                 link = name_elem.get("href", "")
 
                 box = container.find("div", {"class": "box--contents"})
@@ -193,15 +192,17 @@ def extract_pepper_data(html):
                         "div.flex--inline span.vAlign--all-tt span.color--text-NeutralSecondary"
                     )
                     if price_tag:
-                        price_text = price_tag.get_text(strip=True).replace("\xa0", "")
-                        price = extract_price(price_text)
+                        price_text = price_tag.get_text()
+                        price = price_text
 
                 if link == "":
                     link_elem = item.select_one('a[class*="thread-link"], a[href*="/"]')
                     url = link_elem.get("href", "") if link_elem else ""
                     link = clean_url(url, "https://www.pepper.pl")
 
-                products.append({"title": title, "link": link, "price": price})
+                products.append(
+                    {"title": title, "link": link, "price": parse_price(price)}
+                )
             except Exception as e:
                 print(f"Error parsing product: {e}")
                 continue
@@ -209,18 +210,6 @@ def extract_pepper_data(html):
         return products
 
     return products
-
-
-def clean_url(url: str, base_url: str) -> str:
-    """Make sure URL is absolute"""
-    if url.startswith("http"):
-        return url
-    elif url.startswith("//"):
-        return "https:" + url
-    elif url.startswith("/"):
-        return base_url.rstrip("/") + url
-    else:
-        return base_url.rstrip("/") + "/" + url
 
 
 def extract_ceneo_data(html):
@@ -242,7 +231,9 @@ def extract_ceneo_data(html):
                     title = item["name"]
                     price = item["offers"]["lowPrice"]
                     link = item["url"]
-                    products.append({"title": title, "link": link, "price": price})
+                    products.append(
+                        {"title": title, "link": link, "price": parse_price(price)}
+                    )
 
             except json.JSONDecodeError as e:
                 print(f"Error parsing product: {e}")
@@ -250,38 +241,39 @@ def extract_ceneo_data(html):
     return products
 
 
-def extract_price(text: str) -> Optional[float]:
+def clean_url(url: str, base_url: str) -> str:
+    """Make sure URL is absolute"""
+    if url.startswith("http"):
+        return url
+    elif url.startswith("//"):
+        return "https:" + url
+    elif url.startswith("/"):
+        return base_url.rstrip("/") + url
+    else:
+        return base_url.rstrip("/") + "/" + url
+
+
+def parse_price(text: str) -> float:
     """
     Extract numeric price from text
-    Handles formats like: 1 299,99 zł, 1299.99, 1.299,99
+    Handles formats like: 1 299,99 zł, 1299.99, 1.299,99, 4 849zł, 5 390,26zł
     """
     if not text:
-        return None
+        return float("inf")
 
-    # Remove currency symbols and extra text
-    text = text.replace("zł", "").replace("PLN", "").replace("€", "")
-    text = text.replace("\xa0", " ").strip()
+    if isinstance(text, float):
+        return text
 
-    # Find number patterns
-    # Matches: 1299.99, 1 299,99, 1.299,99
-    patterns = [
-        r"(\d+[\s\.]?\d*,\d{2})",  # 1 299,99 or 1.299,99
-        r"(\d+\.\d{2})",  # 1299.99
-        r"(\d+)",  # 1299
-    ]
+    text = (
+        text.replace("zł", "")
+        .replace("PLN", "")
+        .replace("€", "")
+        .replace(" ", "")
+        .replace("\xa0", "")
+        .replace(",", ".")
+    )
 
-    for pattern in patterns:
-        match = re.search(pattern, text)
-        if match:
-            price_str = match.group(1)
-            # Normalize: remove spaces, replace comma with dot
-            price_str = price_str.replace(" ", "").replace(".", "").replace(",", ".")
-            try:
-                return float(price_str)
-            except ValueError:
-                continue
-
-    return None
+    return float(text)
 
 
 # Platform configuration
@@ -292,7 +284,14 @@ PLATFORMS = {
         "query_formatter": lambda q: q.replace(" ", "+"),
         "extractor": extract_amazon_data,
         "enabled": True,
-        "wait_for": "css:div[data-component-type='s-search-result']",
+        "wait_for": "div[data-component-type='s-search-result']",
+        "crawl_config": CrawlerRunConfig(
+            url_matcher=lambda url: "amazon" in url,
+            simulate_user=True,
+            delay_before_return_html=0.5,
+            stream=False,
+            session_id="session_amazon",
+        ),
     },
     "allegro": {
         "name": "Allegro",
@@ -300,7 +299,14 @@ PLATFORMS = {
         "query_formatter": lambda q: q.replace(" ", "%20"),
         "extractor": extract_allegro_data,
         "enabled": True,
-        "wait_for": "css:div[class='opbox-listing']",
+        "wait_for": "div[class='opbox-listing']",
+        "crawl_config": CrawlerRunConfig(
+            url_matcher=lambda url: "allegro" in url,
+            simulate_user=True,
+            delay_before_return_html=0.5,
+            stream=False,
+            session_id="session_allegro",
+        ),
     },
     "pepper": {
         "name": "Pepper",
@@ -308,7 +314,14 @@ PLATFORMS = {
         "query_formatter": lambda q: q.replace(" ", "%20"),
         "extractor": extract_pepper_data,
         "enabled": True,
-        "wait_for": "css:.js-threadList",
+        "wait_for": ".js-threadList",
+        "crawl_config": CrawlerRunConfig(
+            url_matcher=lambda url: "pepper" in url,
+            simulate_user=True,
+            delay_before_return_html=0.5,
+            stream=False,
+            session_id="session_pepper",
+        ),
     },
     "ceneo": {
         "name": "Ceneo",
@@ -316,139 +329,41 @@ PLATFORMS = {
         "query_formatter": lambda q: q.replace(" ", "+"),
         "extractor": extract_ceneo_data,
         "enabled": True,
-        "wait_for": "css:.category-list",
+        "wait_for": ".category-list",
+        "crawl_config": CrawlerRunConfig(
+            url_matcher=lambda url: "ceneo" in url,
+            simulate_user=True,
+            delay_before_return_html=0.5,
+            stream=False,
+            session_id="session_ceneo",
+        ),
     },
 }
 
 
-async def main():
-    crawl_config = CrawlerRunConfig(
-        magic=True,
-        simulate_user=True,
-        delay_before_return_html=2.0,
-    )
+async def scrape_platform(
+    page: Page, platform_id: str, platform_config: dict, product_name: str
+) -> tuple:
+    """Scrape a single platform"""
+    try:
+        formatted_query = platform_config["query_formatter"](product_name)
+        url = platform_config["url_template"].format(query=formatted_query)
 
-    async with AsyncWebCrawler(config=browser_config) as crawler:
-        product_name = "iPhone 16 Pro 256 GB"
-        SIMILARITY_THRESHOLD = 0.8
-        platform_results = {}
+        print(f"🔍 Navigating to {platform_config['name']}...")
 
-        for platform_id, platform_config in PLATFORMS.items():
-            if not platform_config["enabled"]:
-                print(f"⏭️  Skipping {platform_config['name']} (disabled)")
-                continue
-            crawl_config.wait_for = platform_config["wait_for"]
+        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
 
-            formatted_query = platform_config["query_formatter"](product_name)
-            url = platform_config["url_template"].format(query=formatted_query)
-
-            print(f"🔍 Searching {platform_config['name']}...")
-            result = await crawler.arun(url=url, config=crawl_config)
-
-            if not result.success:
-                print(f"❌ Error on {platform_config['name']}: {result.error_message}")
-                platform_results[platform_id] = []
-            else:
-                products = platform_config["extractor"](result.html)
-                filtered_products = filter_products_by_similarity(
-                    products, product_name, SIMILARITY_THRESHOLD
-                )
-                platform_results[platform_id] = filtered_products
-                print(f"✅ Found {len(products)} products on {platform_config['name']}")
-                print(
-                    f"   🎯 {len(filtered_products)} products match after filtering (threshold: {SIMILARITY_THRESHOLD})"
-                )
-
-        # Find cheapest product from each platform
-        def get_cheapest(products, platform_name):
-            if not products:
-                return {
-                    "platform": platform_name,
-                    "title": "N/A",
-                    "link": "N/A",
-                    "price": float("inf"),
-                }
-
-            # Parse price strings to floats for comparison
-            def parse_price(price_str):
-                if price_str == "N/A" or price_str is None:
-                    return float("inf")
-                try:
-                    # Remove currency symbols and whitespace, replace comma with dot
-                    cleaned = (
-                        str(price_str)
-                        .replace(",", ".")
-                        .replace("zł", "")
-                        .replace("PLN", "")
-                        .strip()
-                    )
-                    return float(cleaned)
-                except (ValueError, AttributeError):
-                    return float("inf")
-
-            cheapest = min(products, key=lambda p: parse_price(p.get("price", "N/A")))
-            return {
-                "platform": platform_name,
-                "title": cheapest.get("title", "N/A"),
-                "link": cheapest.get("link", "N/A"),
-                "price": parse_price(cheapest.get("price", "N/A")),
-            }
-
-        # Get cheapest from each platform
-        platform_cheapest = {}
-        for platform_id, platform_config in PLATFORMS.items():
-            if platform_config["enabled"]:
-                products = platform_results.get(platform_id, [])
-                platform_cheapest[platform_id] = get_cheapest(
-                    products, platform_config["name"]
-                )
-
-        # Find overall cheapest
-        all_cheapest = list(platform_cheapest.values())
-        overall_cheapest = (
-            min(all_cheapest, key=lambda p: p["price"]) if all_cheapest else None
-        )
-        overall_cheapest_price = (
-            overall_cheapest["price"]
-            if overall_cheapest and overall_cheapest["price"] != float("inf")
-            else "N/A"
-        )
-
-        # Write to CSV - dynamically generate fields based on enabled platforms
-        with open("price_comparison.csv", "w", newline="", encoding="utf-8") as csvfile:
-            fieldnames = []
-            for platform_id in PLATFORMS.keys():
-                if PLATFORMS[platform_id]["enabled"]:
-                    fieldnames.extend([f"{platform_id}_link", f"{platform_id}_price"])
-            fieldnames.extend(["overall_cheapest_price", "overall_cheapest_platform"])
-
-            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-            writer.writeheader()
-
-            # Build row data
-            row_data = {}
-            for platform_id, cheapest_data in platform_cheapest.items():
-                row_data[f"{platform_id}_link"] = cheapest_data["link"]
-                price_value = (
-                    cheapest_data["price"]
-                    if cheapest_data["price"] != float("inf")
-                    else "N/A"
-                )
-                row_data[f"{platform_id}_price"] = price_value
-
-            row_data["overall_cheapest_price"] = overall_cheapest_price
-            row_data["overall_cheapest_platform"] = (
-                overall_cheapest["platform"] if overall_cheapest else "N/A"
+        try:
+            await page.wait_for_selector(
+                platform_config["wait_for"], timeout=60 * 60 * 1000
             )
+        except Exception as e:
+            print(f"⚠️  Timeout waiting for selector on {platform_config['name']}: {e}")
 
-            writer.writerow(row_data)
+        html = await page.content()
 
-        print("\n✅ Price comparison saved to price_comparison.csv")
-        if overall_cheapest:
-            print(
-                f"🏆 Overall cheapest: {overall_cheapest['platform']} at {overall_cheapest_price} PLN"
-            )
+        return (platform_id, {"success": True, "html": html, "error": None})
 
-
-if __name__ == "__main__":
-    asyncio.run(main())
+    except Exception as e:
+        print(f"❌ Error scraping {platform_config['name']}: {str(e)}")
+        return (platform_id, {"success": False, "html": None, "error": str(e)})
