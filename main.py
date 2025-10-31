@@ -1,16 +1,11 @@
-import asyncio
 import json
 import logging
 from typing import Dict, List
 
-from bs4 import BeautifulSoup
-from crawl4ai import (
-    CrawlerRunConfig,
-)
-from sentence_transformers import SentenceTransformer
 import numpy as np
+from bs4 import BeautifulSoup
 from playwright.async_api import Page
-
+from sentence_transformers import SentenceTransformer
 
 logging.basicConfig(level=logging.INFO)
 
@@ -285,13 +280,6 @@ PLATFORMS = {
         "extractor": extract_amazon_data,
         "enabled": True,
         "wait_for": "div[data-component-type='s-search-result']",
-        "crawl_config": CrawlerRunConfig(
-            url_matcher=lambda url: "amazon" in url,
-            simulate_user=True,
-            delay_before_return_html=0.5,
-            stream=False,
-            session_id="session_amazon",
-        ),
     },
     "allegro": {
         "name": "Allegro",
@@ -300,13 +288,6 @@ PLATFORMS = {
         "extractor": extract_allegro_data,
         "enabled": True,
         "wait_for": "div[class='opbox-listing']",
-        "crawl_config": CrawlerRunConfig(
-            url_matcher=lambda url: "allegro" in url,
-            simulate_user=True,
-            delay_before_return_html=0.5,
-            stream=False,
-            session_id="session_allegro",
-        ),
     },
     "pepper": {
         "name": "Pepper",
@@ -315,13 +296,6 @@ PLATFORMS = {
         "extractor": extract_pepper_data,
         "enabled": True,
         "wait_for": ".js-threadList",
-        "crawl_config": CrawlerRunConfig(
-            url_matcher=lambda url: "pepper" in url,
-            simulate_user=True,
-            delay_before_return_html=0.5,
-            stream=False,
-            session_id="session_pepper",
-        ),
     },
     "ceneo": {
         "name": "Ceneo",
@@ -330,13 +304,6 @@ PLATFORMS = {
         "extractor": extract_ceneo_data,
         "enabled": True,
         "wait_for": ".category-list",
-        "crawl_config": CrawlerRunConfig(
-            url_matcher=lambda url: "ceneo" in url,
-            simulate_user=True,
-            delay_before_return_html=0.5,
-            stream=False,
-            session_id="session_ceneo",
-        ),
     },
 }
 
