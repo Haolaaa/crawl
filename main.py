@@ -1,6 +1,8 @@
 import json
 import logging
 from typing import Dict, List
+import sys
+import os
 
 import numpy as np
 from bs4 import BeautifulSoup
@@ -9,8 +11,24 @@ from sentence_transformers import SentenceTransformer
 
 logging.basicConfig(level=logging.INFO)
 
-embedding_model = SentenceTransformer("Qwen/Qwen3-Embedding-0.6B")
 
+def resource_path(relative_path):
+    """ Get absolute path to resource, works for dev and for PyInstaller """
+    try:
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
+
+
+model_path = resource_path("model_data")
+if os.path.exists(model_path):
+    print(f"Loading model from local path: {model_path}")
+    embedding_model = SentenceTransformer(model_path)
+else:
+    print("Local model not found, downloading...")
+    embedding_model = SentenceTransformer("Qwen/Qwen3-Embedding-0.6B")
 
 def calculate_similarity(query: str, product_title: str) -> float:
     """
