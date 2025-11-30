@@ -1,0 +1,45 @@
+name: Build Windows Exe
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    - name: Install Dependencies
+      run: |
+        pip install -r requirements.txt
+        playwright install chromium
+
+    - name: Download AI Model (Scripted)
+      run: |
+        python -c "from sentence_transformers import SentenceTransformer; model = SentenceTransformer('Qwen/Qwen3-Embedding-0.6B'); model.save('model_data')"
+
+    - name: Build with PyInstaller
+      run: |
+        pyinstaller --noconfirm --onedir --windowed --name "PriceComparator" --add-data "model_data;model_data" --hidden-import="sklearn.utils._typedefs" --hidden-import="sklearn.neighbors._partition_nodes" gui.py
+
+    - name: Copy Playwright Browser to Build Folder
+      shell: powershell
+      run: |
+        $playwrightPath = "$env:LOCALAPPDATA\ms-playwright"
+        $destPath = "dist\PriceComparator\_internal\ms-playwright"
+        New-Item -ItemType Directory -Force -Path $destPath
+        Copy-Item -Path "$playwrightPath\*" -Destination $destPath -Recurse
+
+    - name: Upload Build Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: PriceComparator_Windows_App
+        path: dist/PriceComparator
