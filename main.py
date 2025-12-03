@@ -13,7 +13,7 @@ logging.basicConfig(level=logging.INFO)
 
 
 def resource_path(relative_path):
-    """ Get absolute path to resource, works for dev and for PyInstaller """
+    """Get absolute path to resource, works for dev and for PyInstaller"""
     try:
         # PyInstaller creates a temp folder and stores path in _MEIPASS
         base_path = sys._MEIPASS
@@ -29,6 +29,7 @@ if os.path.exists(model_path):
 else:
     print("Local model not found, downloading...")
     embedding_model = SentenceTransformer("Qwen/Qwen3-Embedding-0.6B")
+
 
 def calculate_similarity(query: str, product_title: str) -> float:
     """
@@ -157,70 +158,100 @@ def extract_allegro_data(html):
 
 
 def extract_pepper_data(html):
+    """
+    Parses HTML to find product list using Vue3 data attributes
+    or fallback DOM scraping.
+    """
     soup = BeautifulSoup(html, "html.parser")
     products = []
 
+    # Method 1: Try parsing the JSON in data-vue3 attributes (More reliable)
     for el in soup.find_all(attrs={"data-vue3": True}):
         data_attr = el.get("data-vue3")
 
         try:
             data_json = json.loads(data_attr)
+            # navigate the nested structure safely
             thread = data_json.get("props", {}).get("thread", {})
 
             title = thread.get("title")
             link = thread.get("shareableLink")
-            price = thread.get("price")
+            price_raw = thread.get("price")
+            temperature = thread.get("temperature")
 
-            if title and link and price:
+            if title:
+                # We calculate numeric price for sorting, but keep raw for display if needed
+                numeric_price = parse_price(str(price_raw)) if price_raw else 0.0
+
                 products.append(
-                    {"title": title, "link": link, "price": parse_price(price)}
+                    {
+                        "title": title,
+                        "link": link,
+                        "price": numeric_price,
+                        "display_price": price_raw,
+                        "temperature": temperature,
+                    }
                 )
 
         except Exception as e:
-            print(f"Error parsing product: {e}")
+            print(f"Error parsing Vue data: {e}")
             continue
 
+    # Method 2: Fallback to DOM scraping if Vue method yielded nothing
     if len(products) == 0:
         for item in soup.select('article[class*="thread"]'):
             try:
                 container = item.find("div", {"class": "threadListCard-body"})
                 if not container:
                     continue
-                link = ""
-                price = ""
 
+                # Title Extraction
                 name_elem = container.select_one(
                     'a[class*="js-thread-title"], span[class*="js-thread-title"]'
                 )
-
                 if not name_elem:
                     continue
-                title = name_elem.get_text()
-                link = name_elem.get("href", "")
+                title = name_elem.get_text(strip=True)
 
+                # Link Extraction
+                link_elem = item.select_one('a[class*="thread-link"], a[href*="/"]')
+                raw_link = link_elem.get("href", "") if link_elem else ""
+                link = clean_url(raw_link, "https://www.pepper.pl")
+
+                # Price Extraction
+                price = 0.0
+                price_text = "0"
                 box = container.find("div", {"class": "box--contents"})
-
                 if box:
                     price_tag = box.select_one(
-                        "div.flex--inline span.vAlign--all-tt span.color--text-NeutralSecondary"
-                    )
+                        "span.color--text-NeutralSecondary"
+                    )  # Adjusted selector based on common pepper themes
                     if price_tag:
-                        price_text = price_tag.get_text()
-                        price = price_text
+                        price_text = price_tag.get_text(strip=True)
+                        price = parse_price(price_text)
 
-                if link == "":
-                    link_elem = item.select_one('a[class*="thread-link"], a[href*="/"]')
-                    url = link_elem.get("href", "") if link_elem else ""
-                    link = clean_url(url, "https://www.pepper.pl")
+                # Temperature Extraction
+                temperature = 0
+                vote_el = item.select_one(".cept-vote-temp span")
+                if vote_el:
+                    temp_text = vote_el.get_text(strip=True).replace("°", "").strip()
+                    try:
+                        temperature = float(temp_text)
+                    except:
+                        temperature = 0
 
                 products.append(
-                    {"title": title, "link": link, "price": parse_price(price)}
+                    {
+                        "title": title,
+                        "link": link,
+                        "price": price,
+                        "display_price": price_text,
+                        "temperature": temperature,
+                    }
                 )
             except Exception as e:
-                print(f"Error parsing product: {e}")
+                print(f"Error parsing DOM product: {e}")
                 continue
-
-        return products
 
     return products
 

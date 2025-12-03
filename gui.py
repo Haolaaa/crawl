@@ -70,6 +70,7 @@ class DatabaseManager:
                 product_title TEXT,
                 price REAL,
                 link TEXT,
+                temperature TEXT,
                 FOREIGN KEY (search_id) REFERENCES searches(id) ON DELETE CASCADE
             )
         """)
@@ -137,19 +138,18 @@ class DatabaseManager:
         search_id = cursor.lastrowid
 
         for platform_id, cheapest_data in platform_cheapest.items():
-            price = cheapest_data["price"]
-
             cursor.execute(
                 """
-                INSERT INTO platform_cheapest (search_id, platform, product_title, price, link)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO platform_cheapest (search_id, platform, product_title, price, link, temperature)
+                VALUES (?, ?, ?, ?, ?, ?)
             """,
                 (
                     search_id,
                     cheapest_data["platform"],
                     cheapest_data.get("title"),
-                    price,
+                    cheapest_data.get("price"),
                     cheapest_data.get("link"),
+                    cheapest_data.get("temperature"),
                 ),
             )
 
@@ -180,7 +180,7 @@ class DatabaseManager:
 
             cursor.execute(
                 """
-                SELECT platform, product_title, price, link
+                SELECT platform, product_title, price, link, temperature
                 FROM platform_cheapest
                 WHERE search_id = ?
                 ORDER BY platform
@@ -200,11 +200,12 @@ class DatabaseManager:
                 "platforms": {},
             }
 
-            for platform, title, price, link in platform_data:
+            for platform, title, price, link, temperature in platform_data:
                 search_dict["platforms"][platform] = {
                     "title": title,
                     "price": price,
                     "link": link,
+                    "temperature": temperature,
                 }
 
             result.append(search_dict)
@@ -258,7 +259,7 @@ class DatabaseManager:
             f"""
             SELECT s.id, s.product_name, s.similarity_threshold, s.search_date,
                 s.overall_cheapest_platform, s.overall_cheapest_price,
-                pc.platform, pc.product_title, pc.price, pc.link
+                pc.platform, pc.product_title, pc.price, pc.link, pc.temperature
             FROM searches s
             LEFT JOIN platform_cheapest pc ON s.id = pc.search_id
             {where_clause}
@@ -293,6 +294,7 @@ class DatabaseManager:
                     "title": row[7],
                     "price": row[8],
                     "link": row[9],
+                    "temperature": row[10],
                 }
 
         # Build rows matching table structure
@@ -309,7 +311,7 @@ class DatabaseManager:
                 for platform_id, platform_config in PLATFORMS.items():
                     platform_name = platform_config["name"]
                     platform_headers.extend(
-                        [f"{platform_name} Link", f"{platform_name} Price"]
+                        [f"{platform_name} Link", f"{platform_name} Price", f"{platform_name} Hot"]
                     )
                 final_headers = (
                     base_headers + platform_headers + ["Overall Cheapest Price"]
@@ -344,6 +346,14 @@ class DatabaseManager:
                         row_data_logical.append(f"{price:.2f}")
                     else:
                         row_data_logical.append("N/A")
+
+                    # temperature
+                    temperature = platform_data.get("temperature")
+                    if temperature is not None:
+                        row_data_logical.append(temperature)
+                    else:
+                        row_data_logical.append("N/A")
+
 
                 # Overall cheapest price
                 overall_price = search["overall_price"]
@@ -482,6 +492,7 @@ class ScraperThread(QThread):
                     "title": "N/A",
                     "link": "N/A",
                     "price": float("inf"),
+                    "temperature": "N/A"
                 }
 
             cheapest = min(
@@ -493,6 +504,7 @@ class ScraperThread(QThread):
                 "title": cheapest.get("title"),
                 "link": cheapest.get("link"),
                 "price": cheapest.get("price"),
+                "temperature": cheapest.get("temperature", "N/A")
             }
 
         platform_cheapest = {}
@@ -670,7 +682,7 @@ class PriceComparisonGUI(QMainWindow):
         platform_headers = []
         for platform_id, platform_config in PLATFORMS.items():
             platform_name = platform_config["name"]
-            platform_headers.extend([f"{platform_name} Link", f"{platform_name} Price"])
+            platform_headers.extend([f"{platform_name} Link", f"{platform_name} Price", f"{platform_name} Hot"])
         final_headers = base_headers + platform_headers + ["Cheapest Price"]
 
         self.searches_table = QTableWidget()
@@ -1048,6 +1060,17 @@ class PriceComparisonGUI(QMainWindow):
                     price_item = QTableWidgetItem("N/A")
 
                 self.searches_table.setItem(row, col, price_item)
+                col += 1
+
+                # temperature
+                temperature = platform_data.get("temperature")
+                if temperature is not None:
+                    temperature_item = QTableWidgetItem(temperature)
+
+                else:
+                    temperature_item = QTableWidgetItem("N/A")
+
+                self.searches_table.setItem(row, col, temperature_item)
                 col += 1
 
             # Overall Cheapest Price
